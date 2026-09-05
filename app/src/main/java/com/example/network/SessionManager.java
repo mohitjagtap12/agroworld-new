@@ -16,6 +16,7 @@ public class SessionManager {
     private static final String KEY_USER_EMAIL = "user_email";
     private static final String KEY_USER_ROLE = "user_role";
     private static final String KEY_USER_VILLAGE = "user_village";
+    private static final String KEY_USER_TALUKA = "user_taluka";
     private static final String KEY_USER_DISTRICT = "user_district";
     private static final String KEY_IS_LOGGED_IN = "is_logged_in";
     private static final String KEY_BASE_URL = "base_url";
@@ -37,13 +38,19 @@ public class SessionManager {
     }
 
     public void saveAuthSession(String token, String userId, String name, String phone, String role, String village, String district) {
+        saveAuthSession(token, userId, name, phone, "", role, village, "", district);
+    }
+
+    public void saveAuthSession(String token, String userId, String name, String phone, String email, String role, String village, String taluka, String district) {
         prefs.edit()
                 .putString(KEY_JWT_TOKEN, token)
                 .putString(KEY_USER_ID, userId)
                 .putString(KEY_USER_NAME, name)
                 .putString(KEY_USER_PHONE, phone)
+                .putString(KEY_USER_EMAIL, email)
                 .putString(KEY_USER_ROLE, role)
                 .putString(KEY_USER_VILLAGE, village)
+                .putString(KEY_USER_TALUKA, taluka)
                 .putString(KEY_USER_DISTRICT, district)
                 .putBoolean(KEY_IS_LOGGED_IN, true)
                 .apply();
@@ -63,6 +70,10 @@ public class SessionManager {
 
     public String getUserPhone() {
         return prefs.getString(KEY_USER_PHONE, "");
+    }
+
+    public String getUserEmail() {
+        return prefs.getString(KEY_USER_EMAIL, "");
     }
 
     public String getUserRole() {

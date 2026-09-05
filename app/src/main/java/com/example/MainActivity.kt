@@ -1,6 +1,7 @@
 package com.example
 
 import android.os.Bundle
+import android.util.Log
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -16,10 +17,13 @@ import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
@@ -35,6 +39,8 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
@@ -46,7 +52,12 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
+import com.example.network.SessionManager
+import com.example.supabase.PhoneUtils
+import com.example.supabase.SupabaseAuthRepository
+import com.example.supabase.SupabaseResult
 import com.example.ui.theme.MyApplicationTheme
+import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
   override fun onCreate(savedInstanceState: Bundle?) {
@@ -63,11 +74,49 @@ class MainActivity : ComponentActivity() {
           composable("splash") {
             SplashScreen(navController = navController)
           }
-          composable("login") {
-            LoginScreen(navController = navController)
-          }
           composable("role_selection") {
             RoleSelectionScreen(navController = navController)
+          }
+          composable(
+            route = "login?role={role}",
+            arguments = listOf(navArgument("role") {
+              type = NavType.StringType
+              defaultValue = ""
+            })
+          ) { backStackEntry ->
+            val role = backStackEntry.arguments?.getString("role") ?: ""
+            LoginScreen(navController = navController, preselectedRole = role)
+          }
+          composable(
+            route = "login/{role}",
+            arguments = listOf(navArgument("role") {
+              type = NavType.StringType
+            })
+          ) { backStackEntry ->
+            val role = backStackEntry.arguments?.getString("role") ?: ""
+            LoginScreen(navController = navController, preselectedRole = role)
+          }
+          composable("login") {
+            LoginScreen(navController = navController, preselectedRole = "")
+          }
+          composable(
+            route = "register?role={role}",
+            arguments = listOf(navArgument("role") {
+              type = NavType.StringType
+              defaultValue = "farmer"
+            })
+          ) { backStackEntry ->
+            val role = backStackEntry.arguments?.getString("role") ?: "farmer"
+            RoleRegistrationScreen(role = role, navController = navController)
+          }
+          composable(
+            route = "register/{role}",
+            arguments = listOf(navArgument("role") {
+              type = NavType.StringType
+            })
+          ) { backStackEntry ->
+            val role = backStackEntry.arguments?.getString("role") ?: "farmer"
+            RoleRegistrationScreen(role = role, navController = navController)
           }
           composable(
             route = "dashboard/{role}",
@@ -79,9 +128,9 @@ class MainActivity : ComponentActivity() {
               "customer" -> CustomerPortalScreen(navController = navController)
               "broker" -> BrokerPortalScreen(navController = navController)
               "seller" -> SellerPortalScreen(navController = navController)
-              "labour" -> LabourPortalScreen(navController = navController)
-              "company" -> CompanyPortalScreen(navController = navController)
-              "delivery" -> DeliveryPartnerPortalScreen(navController = navController)
+              "labour", "farm_squad", "labour_squad" -> LabourPortalScreen(navController = navController)
+              "company", "contract_farming" -> CompanyPortalScreen(navController = navController)
+              "delivery", "delivery_partner" -> DeliveryPartnerPortalScreen(navController = navController)
               "waste", "agri_waste", "waste_buyer" -> AgriWasteMarketplaceScreen(navController = navController, initialMode = "buyer")
               else -> DashboardScreen(role = role, navController = navController)
             }
@@ -95,10 +144,18 @@ class MainActivity : ComponentActivity() {
 // ------------------ SPLASH SCREEN ------------------
 @Composable
 fun SplashScreen(navController: NavController) {
+  val context = LocalContext.current
   LaunchedEffect(Unit) {
-    kotlinx.coroutines.delay(2500)
-    navController.navigate("role_selection") {
-      popUpTo("splash") { inclusive = true }
+    kotlinx.coroutines.delay(1600)
+    val activeRole = SupabaseAuthRepository.getInstance(context).getActiveSessionRole()
+    if (!activeRole.isNullOrEmpty()) {
+      navController.navigate("dashboard/$activeRole") {
+        popUpTo("splash") { inclusive = true }
+      }
+    } else {
+      navController.navigate("role_selection") {
+        popUpTo("splash") { inclusive = true }
+      }
     }
   }
 
@@ -189,241 +246,450 @@ fun SplashScreen(navController: NavController) {
   }
 }
 
-// ------------------ LOGIN SCREEN ------------------
+// ------------------ HELPERS FOR ROLE MAPPING & AUTH ------------------
+fun getRoleDisplayName(roleId: String): String {
+  return when (roleId.lowercase()) {
+    "farmer" -> "Farmer"
+    "labour", "farm_squad", "labour_squad" -> "Labour / Farm Squad"
+    "company", "contract_farming" -> "Contract Farming"
+    "waste", "agri_waste", "waste_buyer" -> "Agri Waste"
+    "seller" -> "Seller"
+    "broker" -> "Broker"
+    "customer" -> "Customer"
+    "delivery", "delivery_partner" -> "Delivery Partner"
+    else -> if (roleId.isBlank()) "AgroWorld" else roleId.replaceFirstChar { it.uppercase() }
+  }
+}
+
+fun getRoleIcon(roleId: String): ImageVector {
+  return when (roleId.lowercase()) {
+    "farmer" -> Icons.Default.Agriculture
+    "labour", "farm_squad", "labour_squad" -> Icons.Default.Engineering
+    "company", "contract_farming" -> Icons.Default.Handshake
+    "waste", "agri_waste", "waste_buyer" -> Icons.Default.Recycling
+    "seller" -> Icons.Default.Storefront
+    "broker" -> Icons.Default.TrendingUp
+    "customer" -> Icons.Default.ShoppingCart
+    "delivery", "delivery_partner" -> Icons.Default.LocalShipping
+    else -> Icons.Default.Agriculture
+  }
+}
+
+// ------------------ LOGIN SCREEN (SUPABASE MOBILE AUTHENTICATION) ------------------
 @Composable
-fun LoginScreen(navController: NavController) {
-  var phoneNumber by remember { mutableStateOf("") }
-  var selectedCountryCode by remember { mutableStateOf("+91") }
-  var isDropdownExpanded by remember { mutableStateOf(false) }
-  var isLoading by remember { mutableStateOf(false) }
+fun LoginScreen(navController: NavController, preselectedRole: String = "") {
+  val effectiveRole = if (preselectedRole.isNotBlank()) preselectedRole.lowercase() else "farmer"
+  val roleDisplayName = getRoleDisplayName(effectiveRole)
   val context = LocalContext.current
+  val coroutineScope = rememberCoroutineScope()
+
+  var mobileNumber by remember { mutableStateOf("") }
+  var password by remember { mutableStateOf("") }
+  var isPasswordVisible by remember { mutableStateOf(false) }
+  var isLoading by remember { mutableStateOf(false) }
+  var errorMessage by remember { mutableStateOf<String?>(null) }
+  var showForgotPasswordDialog by remember { mutableStateOf(false) }
+  var forgotPasswordMobile by remember { mutableStateOf("") }
+  var isRecovering by remember { mutableStateOf(false) }
 
   Box(
     modifier = Modifier
       .fillMaxSize()
-      .background(Color(0xFFFDFBFF))
+      .background(Color(0xFFF8FBF7))
       .testTag("login_screen")
   ) {
     Column(
       modifier = Modifier
         .fillMaxSize()
-        .padding(horizontal = 24.dp, vertical = 32.dp),
-      horizontalAlignment = Alignment.CenterHorizontally,
-      verticalArrangement = Arrangement.SpaceBetween
+        .verticalScroll(rememberScrollState())
+        .statusBarsPadding()
+        .navigationBarsPadding()
+        .padding(horizontal = 24.dp, vertical = 16.dp),
+      horizontalAlignment = Alignment.CenterHorizontally
     ) {
-      Column(
-        horizontalAlignment = Alignment.CenterHorizontally,
+      // Top Navigation Bar with Back Button
+      Row(
         modifier = Modifier
-          .weight(1f)
-          .wrapContentHeight(Alignment.CenterVertically)
+          .fillMaxWidth()
+          .padding(bottom = 16.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
       ) {
-        Box(
+        Row(
           modifier = Modifier
-            .size(96.dp)
-            .clip(RoundedCornerShape(24.dp))
-            .background(Color(0xFFE7F0FF)),
-          contentAlignment = Alignment.Center
+            .clip(RoundedCornerShape(8.dp))
+            .clickable {
+              Log.d("AgroWorldNav", "BACK_CLICKED: returning to role selection from $effectiveRole login")
+              navController.popBackStack()
+            }
+            .padding(horizontal = 8.dp, vertical = 6.dp)
+            .testTag("back_button"),
+          verticalAlignment = Alignment.CenterVertically
         ) {
           Icon(
-            imageVector = Icons.Default.Agriculture,
-            contentDescription = "AgroWorld Brand Icon",
-            tint = Color(0xFF0061A4),
-            modifier = Modifier.size(56.dp)
+            imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+            contentDescription = "Back to role selection",
+            tint = Color(0xFF2E7D32),
+            modifier = Modifier.size(20.dp)
+          )
+          Spacer(modifier = Modifier.width(6.dp))
+          Text(
+            text = "Back",
+            fontSize = 15.sp,
+            fontWeight = FontWeight.SemiBold,
+            color = Color(0xFF2E7D32)
           )
         }
 
-        Spacer(modifier = Modifier.height(28.dp))
-
-        Text(
-          text = "Welcome back",
-          fontSize = 32.sp,
-          fontWeight = FontWeight.Bold,
-          color = Color(0xFF1A1C1E),
-          textAlign = TextAlign.Center
-        )
-
-        Spacer(modifier = Modifier.height(8.dp))
-
-        Text(
-          text = "Empowering the future of sustainable farming.",
-          fontSize = 16.sp,
-          color = Color(0xFF44474E),
-          textAlign = TextAlign.Center,
-          modifier = Modifier.padding(horizontal = 16.dp)
-        )
-
-        Spacer(modifier = Modifier.height(48.dp))
-
-        Column(
-          modifier = Modifier.fillMaxWidth(),
-          horizontalAlignment = Alignment.Start
+        Surface(
+          shape = RoundedCornerShape(12.dp),
+          color = Color(0xFFE8F5E9),
+          border = BorderStroke(1.dp, Color(0xFFC8E6C9))
         ) {
           Text(
-            text = "Mobile Number",
-            fontSize = 14.sp,
+            text = roleDisplayName,
+            fontSize = 12.sp,
             fontWeight = FontWeight.Bold,
-            color = Color(0xFF44474E),
-            modifier = Modifier.padding(start = 4.dp, bottom = 8.dp)
+            color = Color(0xFF2E7D32),
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
           )
+        }
+      }
 
+      Spacer(modifier = Modifier.height(12.dp))
+
+      // Role Icon Avatar Header
+      Box(
+        modifier = Modifier
+          .size(80.dp)
+          .clip(CircleShape)
+          .background(Color(0xFF2E7D32)),
+        contentAlignment = Alignment.Center
+      ) {
+        Icon(
+          imageVector = getRoleIcon(effectiveRole),
+          contentDescription = "$roleDisplayName Icon",
+          tint = Color.White,
+          modifier = Modifier.size(42.dp)
+        )
+      }
+
+      Spacer(modifier = Modifier.height(18.dp))
+
+      // Dynamic Title: "<Role> Login"
+      Text(
+        text = "$roleDisplayName Login",
+        fontSize = 26.sp,
+        fontWeight = FontWeight.Bold,
+        color = Color(0xFF1B1D1B),
+        textAlign = TextAlign.Center,
+        modifier = Modifier.testTag("login_title")
+      )
+
+      Spacer(modifier = Modifier.height(6.dp))
+
+      Text(
+        text = "Sign in to your account with Supabase authentication",
+        fontSize = 14.sp,
+        color = Color(0xFF616161),
+        textAlign = TextAlign.Center,
+        modifier = Modifier.padding(horizontal = 16.dp)
+      )
+
+      Spacer(modifier = Modifier.height(24.dp))
+
+      // Error banner if any
+      errorMessage?.let { msg ->
+        Surface(
+          shape = RoundedCornerShape(12.dp),
+          color = Color(0xFFFFEBEE),
+          border = BorderStroke(1.dp, Color(0xFFFFCDD2)),
+          modifier = Modifier
+            .fillMaxWidth()
+            .padding(bottom = 16.dp)
+        ) {
           Row(
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier.padding(14.dp),
             verticalAlignment = Alignment.CenterVertically
           ) {
-            Box(
-              modifier = Modifier
-                .width(100.dp)
-                .height(56.dp)
-                .clip(RoundedCornerShape(topStart = 16.dp, topEnd = 0.dp, bottomStart = 16.dp, bottomEnd = 0.dp))
-                .background(Color(0xFFF0F4F9))
-                .clickable { isDropdownExpanded = true }
-                .padding(horizontal = 12.dp),
-              contentAlignment = Alignment.Center
-            ) {
-              Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween,
-                modifier = Modifier.fillMaxWidth()
-              ) {
-                Text(
-                  text = selectedCountryCode,
-                  fontSize = 16.sp,
-                  fontWeight = FontWeight.Medium,
-                  color = Color(0xFF1A1C1E)
-                )
-                Icon(
-                  imageVector = Icons.Default.ArrowDropDown,
-                  contentDescription = "Select country code",
-                  tint = Color(0xFF44474E)
-                )
-              }
-
-              DropdownMenu(
-                expanded = isDropdownExpanded,
-                onDismissRequest = { isDropdownExpanded = false }
-              ) {
-                listOf("+91", "+1", "+44", "+61", "+81", "+49").forEach { code ->
-                  DropdownMenuItem(
-                    text = { Text(code) },
-                    onClick = {
-                      selectedCountryCode = code
-                      isDropdownExpanded = false
-                    }
-                  )
-                }
-              }
-            }
-
-            Spacer(modifier = Modifier.width(4.dp))
-
-            OutlinedTextField(
-              value = phoneNumber,
-              onValueChange = { input ->
-                if (input.all { it.isDigit() } && input.length <= 10) {
-                  phoneNumber = input
-                }
-              },
-              placeholder = { Text("Phone number", color = Color(0xFF44474E).copy(alpha = 0.6f)) },
-              keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
-              singleLine = true,
-              colors = OutlinedTextFieldDefaults.colors(
-                focusedContainerColor = Color(0xFFF0F4F9),
-                unfocusedContainerColor = Color(0xFFF0F4F9),
-                focusedBorderColor = Color(0xFF0061A4),
-                unfocusedBorderColor = Color.Transparent
-              ),
-              shape = RoundedCornerShape(topStart = 0.dp, topEnd = 16.dp, bottomStart = 0.dp, bottomEnd = 16.dp),
-              modifier = Modifier
-                .fillMaxWidth()
-                .height(56.dp)
-                .testTag("phone_input")
+            Icon(
+              imageVector = Icons.Default.ErrorOutline,
+              contentDescription = null,
+              tint = Color(0xFFC62828),
+              modifier = Modifier.size(20.dp)
+            )
+            Spacer(modifier = Modifier.width(10.dp))
+            Text(
+              text = msg,
+              fontSize = 13.sp,
+              color = Color(0xFFC62828),
+              modifier = Modifier.weight(1f)
             )
           }
         }
-
       }
 
-      Column(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalAlignment = Alignment.CenterHorizontally
+      // Card Container for Credentials
+      Card(
+        shape = RoundedCornerShape(20.dp),
+        colors = CardDefaults.cardColors(containerColor = Color.White),
+        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
+        modifier = Modifier.fillMaxWidth()
       ) {
-        Button(
-          onClick = {
-            if (phoneNumber.length < 10) {
-              Toast.makeText(context, "Please enter a valid 10-digit phone number", Toast.LENGTH_SHORT).show()
-            } else {
-              isLoading = true
-              navController.navigate("role_selection") {
-                popUpTo("login") { inclusive = true }
-              }
-            }
-          },
-          colors = ButtonDefaults.buttonColors(
-            containerColor = Color(0xFF0061A4),
-            contentColor = Color.White
-          ),
-          shape = RoundedCornerShape(16.dp),
+        Column(
           modifier = Modifier
             .fillMaxWidth()
-            .height(56.dp)
-            .testTag("send_otp_button")
+            .padding(20.dp),
+          verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
-          if (isLoading) {
-            CircularProgressIndicator(color = Color.White, modifier = Modifier.size(24.dp))
-          } else {
-            Row(
-              verticalAlignment = Alignment.CenterVertically,
-              horizontalArrangement = Arrangement.Center
-            ) {
-              Text(
-                text = "Send OTP",
-                fontSize = 16.sp,
-                fontWeight = FontWeight.Bold
+          // Mobile Number Field
+          OutlinedTextField(
+            value = mobileNumber,
+            onValueChange = {
+              if (it.all { ch -> ch.isDigit() || ch == '+' || ch == ' ' || ch == '-' }) {
+                mobileNumber = it
+                errorMessage = null
+              }
+            },
+            label = { Text("Mobile Number") },
+            placeholder = { Text("e.g. 9876543210") },
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
+            leadingIcon = {
+              Icon(Icons.Default.Phone, contentDescription = null, tint = Color(0xFF2E7D32))
+            },
+            singleLine = true,
+            shape = RoundedCornerShape(12.dp),
+            modifier = Modifier
+              .fillMaxWidth()
+              .testTag("phone_input")
+          )
+
+          // Password Field
+          OutlinedTextField(
+            value = password,
+            onValueChange = {
+              password = it
+              errorMessage = null
+            },
+            label = { Text("Password") },
+            placeholder = { Text("Enter password") },
+            visualTransformation = if (isPasswordVisible) VisualTransformation.None else PasswordVisualTransformation(),
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+            leadingIcon = {
+              Icon(Icons.Default.Lock, contentDescription = null, tint = Color(0xFF2E7D32))
+            },
+            trailingIcon = {
+              IconButton(onClick = { isPasswordVisible = !isPasswordVisible }) {
+                Icon(
+                  imageVector = if (isPasswordVisible) Icons.Default.Visibility else Icons.Default.VisibilityOff,
+                  contentDescription = if (isPasswordVisible) "Hide password" else "Show password",
+                  tint = Color(0xFF757575)
+                )
+              }
+            },
+            singleLine = true,
+            shape = RoundedCornerShape(12.dp),
+            modifier = Modifier
+              .fillMaxWidth()
+              .testTag("password_input")
+          )
+
+          // Forgot Password Link
+          Box(
+            modifier = Modifier.fillMaxWidth(),
+            contentAlignment = Alignment.CenterEnd
+          ) {
+            Text(
+              text = "Forgot Password?",
+              fontSize = 13.sp,
+              fontWeight = FontWeight.SemiBold,
+              color = Color(0xFF2E7D32),
+              modifier = Modifier
+                .clickable {
+                  forgotPasswordMobile = mobileNumber
+                  showForgotPasswordDialog = true
+                }
+                .testTag("forgot_password_button")
+            )
+          }
+
+          Spacer(modifier = Modifier.height(4.dp))
+
+          // Primary Action: LOGIN Button
+          Button(
+            onClick = {
+              val mobileValidation = PhoneUtils.validateIndianMobile(mobileNumber)
+              if (mobileValidation != null) {
+                errorMessage = mobileValidation
+                return@Button
+              }
+              if (password.isBlank()) {
+                errorMessage = "Please enter your password"
+                return@Button
+              }
+              if (password.length < 6) {
+                errorMessage = "Password must be at least 6 characters"
+                return@Button
+              }
+
+              coroutineScope.launch {
+                isLoading = true
+                errorMessage = null
+
+                val result = SupabaseAuthRepository.getInstance(context).signIn(
+                  rawMobile = mobileNumber.trim(),
+                  pass = password.trim(),
+                  selectedRole = effectiveRole
+                )
+                isLoading = false
+
+                when (result) {
+                  is SupabaseResult.Success -> {
+                    val profile = result.data
+                    val destRole = profile.role ?: effectiveRole
+                    Log.d("AgroWorldNav", "AUTHENTICATED: ${profile.mobile} as $destRole")
+                    Toast.makeText(context, "Logged in as ${profile.fullName ?: roleDisplayName}", Toast.LENGTH_SHORT).show()
+                    navController.navigate("dashboard/$destRole") {
+                      popUpTo("role_selection") { inclusive = false }
+                    }
+                  }
+                  is SupabaseResult.Error -> {
+                    Log.e("AgroWorldNav", "SIGN_IN_ERROR: ${result.message}")
+                    errorMessage = result.message
+                  }
+                }
+              }
+            },
+            enabled = !isLoading,
+            colors = ButtonDefaults.buttonColors(
+              containerColor = Color(0xFF2E7D32),
+              contentColor = Color.White
+            ),
+            shape = RoundedCornerShape(14.dp),
+            modifier = Modifier
+              .fillMaxWidth()
+              .height(52.dp)
+              .testTag("login_button")
+          ) {
+            if (isLoading) {
+              CircularProgressIndicator(
+                color = Color.White,
+                strokeWidth = 2.dp,
+                modifier = Modifier.size(24.dp)
               )
-              Spacer(modifier = Modifier.width(8.dp))
-              Icon(
-                imageVector = Icons.AutoMirrored.Filled.ArrowForward,
-                contentDescription = "Proceed"
+            } else {
+              Text(
+                text = "LOGIN",
+                fontSize = 16.sp,
+                fontWeight = FontWeight.Bold,
+                letterSpacing = 1.sp
               )
             }
           }
         }
+      }
 
-        Spacer(modifier = Modifier.height(24.dp))
+      Spacer(modifier = Modifier.height(20.dp))
 
-        Row(
-          horizontalArrangement = Arrangement.Center,
-          verticalAlignment = Alignment.CenterVertically,
-          modifier = Modifier.fillMaxWidth()
-        ) {
-          Text(
-            text = "Privacy Policy",
-            fontSize = 12.sp,
-            color = Color(0xFF44474E),
-            modifier = Modifier.clickable { }
-          )
-          Spacer(modifier = Modifier.width(16.dp))
-          Text(
-            text = "•",
-            fontSize = 12.sp,
-            color = Color(0xFF44474E)
-          )
-          Spacer(modifier = Modifier.width(16.dp))
-          Text(
-            text = "Terms & Conditions",
-            fontSize = 12.sp,
-            color = Color(0xFF44474E),
-            modifier = Modifier.clickable { }
-          )
-        }
-        Spacer(modifier = Modifier.height(8.dp))
+      // Switch to Create Account / Registration for Selected Role
+      Row(
+        modifier = Modifier
+          .clip(RoundedCornerShape(8.dp))
+          .clickable {
+            errorMessage = null
+            navController.navigate("register?role=$effectiveRole")
+          }
+          .padding(8.dp)
+          .testTag("create_account_button"),
+        horizontalArrangement = Arrangement.Center,
+        verticalAlignment = Alignment.CenterVertically
+      ) {
         Text(
-          text = "© 2026 AgroWorld. All rights reserved.",
-          fontSize = 11.sp,
-          color = Color(0xFF44474E)
+          text = "Don't have an account? ",
+          fontSize = 14.sp,
+          color = Color(0xFF616161)
+        )
+        Text(
+          text = "Create Account",
+          fontSize = 14.sp,
+          fontWeight = FontWeight.Bold,
+          color = Color(0xFF2E7D32)
         )
       }
+
+      Spacer(modifier = Modifier.height(24.dp))
+
+      Text(
+        text = "Secure Supabase Authentication • AgroWorld Platform",
+        fontSize = 11.sp,
+        color = Color(0xFF757575)
+      )
     }
+  }
+
+  // Forgot Password Dialog
+  if (showForgotPasswordDialog) {
+    AlertDialog(
+      onDismissRequest = { showForgotPasswordDialog = false },
+      title = { Text("Reset Password") },
+      text = {
+        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+          Text(
+            text = "Enter your registered Indian mobile number to receive password recovery instructions via Supabase Auth.",
+            fontSize = 14.sp,
+            color = Color(0xFF616161)
+          )
+          OutlinedTextField(
+            value = forgotPasswordMobile,
+            onValueChange = { forgotPasswordMobile = it },
+            label = { Text("Mobile Number") },
+            placeholder = { Text("e.g. 9876543210") },
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
+            singleLine = true,
+            shape = RoundedCornerShape(12.dp),
+            modifier = Modifier.fillMaxWidth()
+          )
+        }
+      },
+      confirmButton = {
+        Button(
+          onClick = {
+            val phoneErr = PhoneUtils.validateIndianMobile(forgotPasswordMobile)
+            if (phoneErr != null) {
+              Toast.makeText(context, phoneErr, Toast.LENGTH_SHORT).show()
+              return@Button
+            }
+            coroutineScope.launch {
+              isRecovering = true
+              val res = SupabaseAuthRepository.getInstance(context).recoverPassword(forgotPasswordMobile)
+              isRecovering = false
+              showForgotPasswordDialog = false
+              when (res) {
+                is SupabaseResult.Success -> {
+                  Toast.makeText(context, res.data, Toast.LENGTH_LONG).show()
+                }
+                is SupabaseResult.Error -> {
+                  Toast.makeText(context, res.message, Toast.LENGTH_LONG).show()
+                }
+              }
+            }
+          },
+          enabled = !isRecovering,
+          colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2E7D32))
+        ) {
+          if (isRecovering) {
+            CircularProgressIndicator(color = Color.White, strokeWidth = 2.dp, modifier = Modifier.size(18.dp))
+          } else {
+            Text("Send Recovery Link", color = Color.White)
+          }
+        }
+      },
+      dismissButton = {
+        TextButton(onClick = { showForgotPasswordDialog = false }) {
+          Text("Cancel", color = Color(0xFF616161))
+        }
+      }
+    )
   }
 }
 
@@ -568,7 +834,9 @@ fun RoleSelectionScreen(navController: NavController) {
               Button(
                 onClick = {
                   selectedRoleId?.let { roleId ->
-                    navController.navigate("dashboard/$roleId")
+                    Log.d("AgroWorldNav", "ROLE_SELECTED: $roleId")
+                    Log.d("AgroWorldNav", "OPENING_LOGIN: $roleId")
+                    navController.navigate("login?role=$roleId")
                   }
                 },
                 enabled = selectedRoleId != null,
@@ -585,7 +853,7 @@ fun RoleSelectionScreen(navController: NavController) {
                   .testTag("continue_button")
               ) {
                 Text(
-                  text = "Continue to Portal",
+                  text = if (selectedRoleId != null) "Continue to ${getRoleDisplayName(selectedRoleId!!)} Login" else "Select Role & Continue",
                   fontSize = 16.sp,
                   fontWeight = FontWeight.Bold
                 )
@@ -607,7 +875,12 @@ fun RoleSelectionScreen(navController: NavController) {
                   fontSize = 14.sp,
                   fontWeight = FontWeight.Bold,
                   color = Color(0xFF2E7D32),
-                  modifier = Modifier.clickable { }
+                  modifier = Modifier.clickable {
+                    val targetRole = selectedRoleId ?: "farmer"
+                    Log.d("AgroWorldNav", "ROLE_SELECTED: $targetRole")
+                    Log.d("AgroWorldNav", "OPENING_LOGIN: $targetRole")
+                    navController.navigate("login?role=$targetRole")
+                  }
                 )
               }
             }
@@ -671,7 +944,12 @@ fun RoleSelectionScreen(navController: NavController) {
                   elevation = CardDefaults.cardElevation(defaultElevation = if (isSelected) 3.dp else 1.dp),
                   modifier = Modifier
                     .fillMaxWidth()
-                    .clickable { selectedRoleId = role.id }
+                    .clickable {
+                      selectedRoleId = role.id
+                      Log.d("AgroWorldNav", "ROLE_SELECTED: ${role.id}")
+                      Log.d("AgroWorldNav", "OPENING_LOGIN: ${role.id}")
+                      navController.navigate("login?role=${role.id}")
+                    }
                     .testTag("role_card_${role.id}")
                 ) {
                   Row(
@@ -751,7 +1029,12 @@ fun RoleSelectionScreen(navController: NavController) {
                   elevation = CardDefaults.cardElevation(defaultElevation = if (isSelected) 3.dp else 1.dp),
                   modifier = Modifier
                     .fillMaxWidth()
-                    .clickable { selectedRoleId = role.id }
+                    .clickable {
+                      selectedRoleId = role.id
+                      Log.d("AgroWorldNav", "ROLE_SELECTED: ${role.id}")
+                      Log.d("AgroWorldNav", "OPENING_LOGIN: ${role.id}")
+                      navController.navigate("login?role=${role.id}")
+                    }
                     .testTag("role_card_${role.id}")
                 ) {
                   Row(

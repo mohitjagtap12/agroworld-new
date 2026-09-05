@@ -1,4 +1,5 @@
-import com.google.gms.googleservices.GoogleServicesPlugin.MissingGoogleServicesStrategy
+// Supabase Role-based Authentication & Database enabled
+// Firebase removed per strict architecture mandate
 
 plugins {
   alias(libs.plugins.android.application)
@@ -6,7 +7,7 @@ plugins {
   // alias(libs.plugins.google.devtools.ksp)
   alias(libs.plugins.roborazzi)
   alias(libs.plugins.secrets)
-  alias(libs.plugins.google.services)
+  // alias(libs.plugins.google.services)
 }
 
 android {
@@ -67,13 +68,13 @@ secrets {
   defaultPropertiesFileName = ".env.example"
 }
 
-googleServices { missingGoogleServicesStrategy = MissingGoogleServicesStrategy.WARN }
+// googleServices removed per Supabase authentication mandate
 
 // Some unused dependencies are commented out below instead of being removed.
 // This makes it easy to add them back in the future if needed.
 dependencies {
   implementation(platform(libs.androidx.compose.bom))
-  implementation(platform(libs.firebase.bom))
+  // Firebase removed - Supabase is the backend platform
   // AndroidX and Material Components for Java + XML support
   implementation(libs.androidx.appcompat)
   implementation(libs.material)
@@ -110,7 +111,7 @@ dependencies {
   implementation(libs.coil.compose)
   implementation(libs.converter.moshi)
   implementation(libs.converter.gson)
-  implementation(libs.firebase.ai)
+  // implementation(libs.firebase.ai)
   // Uncomment to use Firestore:
   // implementation(libs.firebase.firestore)
 
@@ -121,7 +122,7 @@ dependencies {
   // implementation(libs.androidx.credentials)
   // implementation(libs.androidx.credentials.play.services)
   // implementation(libs.googleid)
-  implementation(libs.firebase.appcheck.recaptcha)
+  // implementation(libs.firebase.appcheck.recaptcha)
   implementation(libs.kotlinx.coroutines.android)
   implementation(libs.kotlinx.coroutines.core)
   implementation(libs.logging.interceptor)
